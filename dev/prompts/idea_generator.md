@@ -5,7 +5,6 @@ Your task is to review the provided PROMPT/TOPIC, which may be a simple subject 
 OUTPUT CONSTRAINT:
 Output a structured plain-text strategy (do NOT use JSON) that explicitly defines the following fields exactly as named below:
 
-category_slug: [the lowercase taxonomy category chosen exactly as provided in the instructions, e.g., statistics, encoding, container, or styling]
 context_slug: [a single lowercase word for the scenario, e.g., temperatures, budget]
 global_reality: [a description of the honest baseline reality of the full dataset]
 local_narrative: [a description of the deceptive subset or perspective that the altered chart will force]
