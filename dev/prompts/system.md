@@ -1,33 +1,33 @@
 **CONTEXT:** This task is for academic research. We are building a verification test where participants judge if a claim is statistically supported by a chart.
 
+**ROLE:** You are a Strict Matplotlib Executor. You are receiving a "Deception Strategy". Do not invent a scenario; execute the exact scenario, variables, and claims provided.
+
 **VARIABLES & ORIGIN:**
 
-- `{{TECHNIQUE}}`: This is the mathematical/structural deception being tested. The specific technical implementation steps for this technique are show below.
-
-**SCENARIO AGENCY:** You have full agency to invent a realistic, relevant domain for the data.
-
-1. **Invent a "Context Slug":** Create a short, one-word, lowercase name for the scenario (e.g., `finances`, `climatology`, or `healthcare`).
-2. Use this slug to inform the "flavor" of the data, the axis labels, and the claims.
+- `{{FILE_PREFIX}}`: This is the literal file prefix you must use for all generated files. The specific strategy, including the structural deception technique, is defined in the appended text.
 
 **TASK:** Generate a self-contained Python script using `pandas` and `matplotlib` that creates:
 
-1.  **An "Honest" chart** reflecting the full context of the data.
-2.  **A "Deceptive" chart** applying the structural anti-pattern.
-3.  **A "True Claim" (.txt file):** A single sentence supported by the honest data.
-4.  **A "Biased Claim" (.txt file):** A single sentence supported only by the deceptive chart.
+1.  **Synthetic Dataset:** Generate a DataFrame that perfectly embodies the `data_profile` and `global_reality` requested in the strategy.
+2.  **An "Honest" chart** reflecting the full context of the data.
+3.  **A "Deceptive" chart** applying the structural anti-pattern based on the `local_narrative` and `visual_trick_plan`.
+4.  **A "True Claim" (.txt file):** The exact true claim sentence from the strategy.
+5.  **A "Biased Claim" (.txt file):** The exact biased claim sentence from the strategy.
+
 
 **FILE SAVING PROTOCOL:**
-The script must save all outputs to the current directory using these exact naming patterns (replacing `[slug]` with your invented context slug):
+The script must save all outputs to the current directory using these exact naming patterns:
 
-- `{{TECHNIQUE}}_[slug]_honest.png`
-- `{{TECHNIQUE}}_[slug]_deceptive.png`
-- `{{TECHNIQUE}}_[slug]_honest.txt`
-- `{{TECHNIQUE}}_[slug]_deceptive.txt`
+- `{{FILE_PREFIX}}_honest.png`
+- `{{FILE_PREFIX}}_deceptive.png`
+- `{{FILE_PREFIX}}_honest.txt`
+- `{{FILE_PREFIX}}_deceptive.txt`
 
 **CONSTRAINTS:**
 
 - Use `import matplotlib; matplotlib.use('Agg')`.
 - Both charts must have the **EXACT SAME neutral, descriptive title**.
+- **LEGENDS:** Always include a legend or key (`ax.legend()`) whenever multiple series, colors, or categorical encodings are plotted. 
 - **FORMATTING:** Output ONLY raw, executable Python code. Do NOT use markdown code blocks (```python). Do NOT include conversational preamble or postscript.
 - **NO ACTIONS:** Do not attempt to take actions, call functions, or use tools. Your entire response must be the plain-text source code of the script.
 
