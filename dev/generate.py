@@ -124,6 +124,33 @@ def main():
     print("  - strategy.txt (Idea definition)")
     print("  - script.py (Execution code)")
     print("  - *.png and *.txt (Generated results)")
+    
+    upload_url = "https://staging.visual-honesty.rohankapur.dev/api/developer/upload"
+    honest_png = f"{file_prefix}_honest.png"
+    deceptive_png = f"{file_prefix}_deceptive.png"
+
+    if os.path.exists(honest_png) and os.path.exists(deceptive_png):
+        print("🌐 Uploading generated dataset to Staging API...")
+        import requests
+        with open(honest_png, 'rb') as f_honest, open(deceptive_png, 'rb') as f_deceptive:
+            files = {
+                'honest_image': (honest_png, f_honest, 'image/png'),
+                'deceptive_image': (deceptive_png, f_deceptive, 'image/png')
+            }
+            data = {
+                'set_name': f"{file_prefix}_{timestamp}",
+                'category': target_category
+            }
+            try:
+                resp = requests.post(upload_url, files=files, data=data, timeout=30)
+                if resp.status_code == 200:
+                    print("✅ Successfully uploaded to Staging API!")
+                else:
+                    print(f"⚠️ API Status Error: {resp.status_code} - {resp.text}")
+            except Exception as e:
+                print(f"⚠️ Network error uploading to API: {e}")
+    else:
+        print("⚠️ Skipped API upload: Rendered PNGs not found.")
 
 if __name__ == "__main__":
     main()
