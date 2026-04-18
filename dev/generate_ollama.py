@@ -7,12 +7,16 @@ import datetime
 import subprocess
 from pathlib import Path
 
-def main():
-    # Default to the deception taxonomy taxonomy
-    topic_path = "prompts/deception_taxonomy.md"
-    # If an argument is provided, treat it as extra instructions
-    extra_instructions = sys.argv[1] if len(sys.argv) > 1 else ""
+# ==========================================
+# CONFIGURATION
+# ==========================================
+# Set this to the exact name of the model installed in your local Ollama instance
+OLLAMA_MODEL = "gemma4:26b"
+# ==========================================
 
+def main():
+    topic_path = "prompts/deception_taxonomy.md"
+    extra_instructions = sys.argv[1] if len(sys.argv) > 1 else ""
     system_file = "prompts/system.md"
 
     import random
@@ -23,19 +27,15 @@ def main():
         print(f"🎯 Reading prompt from file: {topic_path}")
         with open(topic_path, 'r', encoding='utf-8') as f:
             topic_text = f.read()
-        
         basename = os.path.basename(topic_path)
         name_without_ext = os.path.splitext(basename)[0]
-        # Equivalent to: tr -dc '[:alnum:]\-_' | tr '[:upper:]' '[:lower:]' | cut -c 1-20
         safe_topic = re.sub(r'[^a-zA-Z0-9\-_]', '', name_without_ext).lower()[:20]
     else:
         print(f"🎯 Topic specified: {topic_path}")
         topic_text = topic_path
-        # Equivalent to: tr -dc '[:alnum:] \-_' | tr ' ' '_' | tr '[:upper:]' '[:lower:]' | cut -c 1-20
         safe_topic = re.sub(r'[^a-zA-Z0-9 \-_]', '', topic_path)
         safe_topic = safe_topic.replace(' ', '_').lower()[:20]
 
-    # 1. Verify system file exists
     if not os.path.isfile(system_file):
         print(f"❌ Error: System prompt {system_file} not found.")
         sys.exit(1)
@@ -46,7 +46,9 @@ def main():
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     date_str = datetime.datetime.now().strftime("%Y%m%d")
 
-    print(f"🧠 STEP 1: Consulting Gemini for idea generation...")
+    print(f"🧠 STEP 1: Consulting Ollama ({OLLAMA_MODEL}) for idea generation...")
+    import ollama
+    
     with open(idea_generator_path, 'r', encoding='utf-8') as f:
         idea_prompt = f.read()
     
@@ -58,16 +60,17 @@ def main():
     idea_prompt = idea_prompt.replace("{{TARGET_CATEGORY}}", target_category)
     idea_prompt = idea_prompt.replace("{{TARGET_FORMAT}}", target_format)
     
-    gemini_input = f"{idea_prompt}\n\n**PROMPT/TOPIC:**\n{topic_text}"
-    result = subprocess.run(
-        ["gemini", "-m", "gemini-3-flash-preview"],
-        input=gemini_input.encode('utf-8'),
-        capture_output=True,
-        check=True
+    client = ollama.Client(host='http://127.0.0.1:11434')
+    ollama_input = f"{idea_prompt}\n\n**PROMPT/TOPIC:**\n{topic_text}"
+    response = client.chat(
+        model=OLLAMA_MODEL,
+        messages=[{'role': 'user', 'content': ollama_input}]
     )
-    content = result.stdout.decode('utf-8').strip()
     
-    # Natively strip any "chain of thought" or conversational preamble Gemini outputs
+    content = getattr(response.message, 'content', '') if hasattr(response, 'message') else response.get('message', {}).get('content', '')
+    content = content.strip()
+    
+    # Natively strip any "chain of thought" or conversational preamble LLMs output
     if "category_slug:" in content:
         content = "category_slug:" + content.split("category_slug:", 1)[1]
 
@@ -80,11 +83,8 @@ def main():
 
     file_prefix = f"{category_slug}_{context_slug}_{date_str}"
 
-    # 2. Create and enter the workspace
     workspace = f"output/{file_prefix}_{timestamp}"
     os.makedirs(workspace, exist_ok=True)
-
-    # Change directory (affects the current process and its subprocesses)
     os.chdir(workspace)
     print(f"🚀 Workspace created: {workspace}")
 
@@ -96,7 +96,7 @@ def main():
 
     print("📝 Strategy generated and saved to strategy.txt.")
 
-    print("🧠 STEP 2: Consulting Gemini for Code Execution...")
+    print(f"🧠 STEP 2: Consulting Ollama ({OLLAMA_MODEL}) for Code Execution...")
     with open(system_path, 'r', encoding='utf-8') as f:
         system_text = f.read()
     
@@ -109,13 +109,27 @@ def main():
     if extra_instructions:
         merged_text += f"\n\n**MANUAL INSTRUCTIONS:**\n{extra_instructions}"
 
+    code_response = client.chat(
+        model=OLLAMA_MODEL,
+        messages=[{'role': 'user', 'content': merged_text}]
+    )
+    
+    code_content = getattr(code_response.message, 'content', '') if hasattr(code_response, 'message') else code_response.get('message', {}).get('content', '')
+    code_content = code_content.strip()
+    
+    # Strip markdown wrappers naturally produced by local models
+    if "```python" in code_content:
+        code_content = code_content.split("```python")[1].split("```")[0]
+    elif "```" in code_content:
+        code_content = code_content.split("```")[1].split("```")[0]
+
+    # Smaller/experimental Gemma models often leak raw vocabulary tokens like <unused56>
+    # This regex aggressively scrubs those tokens out so they don't break Python syntax
+    code_content = re.sub(r'<unused\d+>', '', code_content)
+    code_content = code_content.replace('<eos>', '').replace('<bos>', '')
+
     with open("script.py", "w", encoding='utf-8') as out_f:
-        subprocess.run(
-            ["gemini", "-m", "gemini-3-flash-preview"],
-            input=merged_text.encode('utf-8'),
-            stdout=out_f,
-            check=True
-        )
+        out_f.write(code_content.strip() + "\n")
 
     print("📊 Rendering charts...")
     max_retries = 3

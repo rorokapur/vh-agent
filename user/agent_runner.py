@@ -19,7 +19,7 @@ import ollama
 ollama_client = ollama.Client(host='http://127.0.0.1:11434')
 
 BASE_URL = "https://staging.visual-honesty.rohankapur.dev"
-MODEL_NAME = "gemma4:26b"
+MODEL_NAME = "gemma4:e2b"
 MAX_STREAM_TIME = 60.0
 
 class Colors:
@@ -307,6 +307,10 @@ def main():
         if agent.submit_trial(trial_id, choice_id, analysis_time):
             trials_conducted += 1
             print(f"Progress: {trials_conducted} trials completed.")
+            
+            # Fetch stats immediately to trigger the backend upsert pattern
+            _ = agent.get_results_summary()
+            print("[Sync] Fetched results to upsert latest stats in backend.")
         else:
             print("Failed to submit trial. Retrying sequence...")
             # We don't increment trials_conducted if submission failed
