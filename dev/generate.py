@@ -9,7 +9,7 @@ from pathlib import Path
 
 def main():
     # Default to the deception taxonomy taxonomy
-    topic_path = "prompts/deception_taxonomy.txt"
+    topic_path = "prompts/deception_taxonomy.md"
     # If an argument is provided, treat it as extra instructions
     extra_instructions = sys.argv[1] if len(sys.argv) > 1 else ""
 
@@ -17,15 +17,12 @@ def main():
 
     import random
     categories = ["Statistics", "Encoding", "Container", "Styling"]
+    formats = ["Heatmap", "Waterfall Chart", "Violin Plot", "Lollipop Chart", "Radar Chart", "Slope Graph", "Hexbin Plot", "Bubble Chart", "Treemap", "Density Plot", "Mosaic Plot", "Standard Bar Chart", "Standard Line Chart", "Scatter Plot", "Pie Chart"]
 
     if os.path.isfile(topic_path):
         print(f"🎯 Reading prompt from file: {topic_path}")
         with open(topic_path, 'r', encoding='utf-8') as f:
             topic_text = f.read()
-        
-        target_category = random.choice(categories)
-        topic_text = topic_text.replace("{{TARGET_CATEGORY}}", target_category)
-        print(f"🎲 Randomly assigned deception category: {target_category}")
         
         basename = os.path.basename(topic_path)
         name_without_ext = os.path.splitext(basename)[0]
@@ -45,25 +42,34 @@ def main():
 
     system_path = Path(system_file).resolve()
     idea_generator_path = Path("prompts/idea_generator.md").resolve()
-    ollama_model = "gemma4:26b"
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     date_str = datetime.datetime.now().strftime("%Y%m%d")
 
-    print(f"🧠 STEP 1: Consulting Ollama ({ollama_model}) for idea generation...")
-    import ollama
+    print(f"🧠 STEP 1: Consulting Gemini for idea generation...")
     with open(idea_generator_path, 'r', encoding='utf-8') as f:
         idea_prompt = f.read()
     
-    ollama_input = f"{idea_prompt}\n\n**PROMPT/TOPIC:**\n{topic_text}"
-    client = ollama.Client(host='http://127.0.0.1:11434')
-    response = client.chat(
-        model=ollama_model,
-        messages=[{'role': 'user', 'content': ollama_input}]
-    )
+    target_category = random.choice(categories)
+    target_format = random.choice(formats)
+    print(f"🎲 Randomly assigned deception category: {target_category}")
+    print(f"🎲 Randomly assigned chart format: {target_format}")
     
-    content = getattr(response.message, 'content', '') if hasattr(response, 'message') else response.get('message', {}).get('content', '')
-    content = content.strip()
+    idea_prompt = idea_prompt.replace("{{TARGET_CATEGORY}}", target_category)
+    idea_prompt = idea_prompt.replace("{{TARGET_FORMAT}}", target_format)
+    
+    gemini_input = f"{idea_prompt}\n\n**PROMPT/TOPIC:**\n{topic_text}"
+    result = subprocess.run(
+        ["gemini", "-m", "gemini-3-flash-preview"],
+        input=gemini_input.encode('utf-8'),
+        capture_output=True,
+        check=True
+    )
+    content = result.stdout.decode('utf-8').strip()
+    
+    # Natively strip any "chain of thought" or conversational preamble Gemini outputs
+    if "category_slug:" in content:
+        content = "category_slug:" + content.split("category_slug:", 1)[1]
 
     category_slug = "unknown"
     context_slug = "unknown"

@@ -27,6 +27,7 @@ The script must save all outputs to the current directory using these exact nami
 
 - Use `import matplotlib; matplotlib.use('Agg')`.
 - Both charts must have the **EXACT SAME neutral, descriptive title**.
+- **FORMAT RESTRICTION**: You MUST structure the `honest` and `deceptive` plots primarily using the specific `chart_format` defined in the strategy document (e.g., if assigned a Heatmap, render a Heatmap). Do not default to generic line/bar charts unless assigned.
 - **LEGENDS:** Always include a legend or key (`ax.legend()`) whenever multiple series, colors, or categorical encodings are plotted. 
 - **FORMATTING:** Output ONLY raw, executable Python code. Do NOT use markdown code blocks (```python). Do NOT include conversational preamble or postscript.
 - **NO ACTIONS:** Do not attempt to take actions, call functions, or use tools. Your entire response must be the plain-text source code of the script.

@@ -16,9 +16,4 @@ For your design task, the deception pipeline is strictly categorized into the fo
 - **Styling**: This category involves the aesthetic and perceptual properties applied over the chart (colors, textures, strokes, 3D effects, shading). Deceptive techniques here exploit human visual psychology to draw false attention or obfuscate critical data points.
   - *Examples (Non-exhaustive)*: Misleading color gradients (e.g., using a diverging color palette for sequential data), low luminance-contrast to hide poor performance data points, or 3D chart tilts/perspective warping that visually distorts the area of distant segments. You may deploy any perceptual/stylistic exploit.
 
-## INSTRUCTIONS
 
-1. Review the four pipeline categories defined above. Many techniques bleed into multiple categories or compound them; that is perfectly okay, just identify the primary one.
-2. You have been assigned the following mandatory category for this scenario: **{{TARGET_CATEGORY}}**. (Unless a specific category was overridden via manual prompt instructions, you MUST invent a technique rooted in this assigned category).
-3. Invent a highly specific, realistic deceptive technique that roots itself structurally or mathematically in your chosen category. You are perfectly welcome to use the examples provided or invent novel, compounding manipulations.
-4. Apply this technique to a highly realistic, professional dataset scenario.
