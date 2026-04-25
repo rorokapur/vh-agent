@@ -14,6 +14,9 @@ MAX_CODE_RETRIES = 3
 MAX_CODE_REVISIONS = 3
 MAX_EVALUATOR_RETRIES = 3
 
+GEMINI_MODEL = "gemini-3.1-pro-preview"
+OLLAMA_MODEL = "gemma4:26b"
+
 def evaluate_chart_with_history(strategy_text, code_text, image_paths, claim_a, claim_b, log_path="evaluator_log.txt"):
     import ollama  # type: ignore
     import re
@@ -35,7 +38,7 @@ def evaluate_chart_with_history(strategy_text, code_text, image_paths, claim_a, 
         chat_history.append({'role': 'user', 'content': prompt_1, 'images': image_paths})
         
         print("      > Turn 1: Blind Analysis & Incoherence Check...")
-        response_1 = ollama.chat(model='gemma4:e2b', messages=chat_history)
+        response_1 = ollama.chat(model=OLLAMA_MODEL, messages=chat_history)
         chat_history.append(response_1.get('message', getattr(response_1, 'message', {})))
         
         # Turn 2: Idea / Strategy Evaluation
@@ -43,7 +46,7 @@ def evaluate_chart_with_history(strategy_text, code_text, image_paths, claim_a, 
         chat_history.append({'role': 'user', 'content': prompt_2})
         
         print("      > Turn 2: Idea Evaluation & Strategy Alignment...")
-        response_2 = ollama.chat(model='gemma4:e2b', messages=chat_history)
+        response_2 = ollama.chat(model=OLLAMA_MODEL, messages=chat_history)
         chat_history.append(response_2.get('message', getattr(response_2, 'message', {})))
         
         turn_2_text = response_2.get('message', {}).get('content', '').upper()
@@ -63,7 +66,7 @@ def evaluate_chart_with_history(strategy_text, code_text, image_paths, claim_a, 
         chat_history.append({'role': 'user', 'content': prompt_3})
         
         print("      > Turn 3: Final Verdict (Code Fixes)...")
-        response_3 = ollama.chat(model='gemma4:e2b', messages=chat_history)
+        response_3 = ollama.chat(model=OLLAMA_MODEL, messages=chat_history)
         chat_history.append(response_3.get('message', getattr(response_3, 'message', {})))
         
         save_log()
@@ -144,7 +147,7 @@ def main():
             print(f"\n🧠 STEP 1: Consulting Gemini for idea generation (Revision {strategy_revision + 1}/{MAX_STRATEGY_REVISIONS}, Attempt {strategy_attempt + 1}/{MAX_STRATEGY_RETRIES})...")
             
             result = subprocess.run(
-                ["gemini", "-m", "gemini-3-flash-preview"],
+                ["gemini", "-m", GEMINI_MODEL],
                 input=idea_history.encode('utf-8'),
                 capture_output=True,
                 check=True
@@ -215,7 +218,7 @@ def main():
     
                 with open("script.py", "w", encoding='utf-8') as out_f:
                     subprocess.run(
-                        ["gemini", "-m", "gemini-3-flash-preview"],
+                        ["gemini", "-m", GEMINI_MODEL],
                         input=gemini_code_input.encode('utf-8'),
                         stdout=out_f,
                         check=True
