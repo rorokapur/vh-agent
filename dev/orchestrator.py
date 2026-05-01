@@ -8,14 +8,27 @@ import subprocess
 from pathlib import Path
 import random
 
-MAX_STRATEGY_REVISIONS = 2
+MAX_STRATEGY_REVISIONS = 10
 MAX_STRATEGY_RETRIES = 3
 MAX_CODE_RETRIES = 3
-MAX_CODE_REVISIONS = 3
+MAX_CODE_REVISIONS = 5
 MAX_EVALUATOR_RETRIES = 3
 
-GEMINI_MODEL = "gemini-3.1-pro-preview"
-OLLAMA_MODEL = "gemma4:26b"
+PROMPTS_DIR = Path(__file__).parent / "prompts"
+
+def load_prompt(filename, **kwargs):
+    path = PROMPTS_DIR / filename
+    if not path.exists():
+        print(f"❌ Error: Prompt file {path} not found.")
+        sys.exit(1)
+    with open(path, 'r', encoding='utf-8') as f:
+        text = f.read()
+    for k, v in kwargs.items():
+        text = text.replace(f"{{{{{k.upper()}}}}}", str(v))
+    return text.strip()
+
+GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
+OLLAMA_MODEL = "gemma4:e4b"
 
 def evaluate_chart_with_history(strategy_text, code_text, image_paths, claim_a, claim_b, log_path="evaluator_log.txt"):
     import ollama  # type: ignore
@@ -23,7 +36,7 @@ def evaluate_chart_with_history(strategy_text, code_text, image_paths, claim_a, 
     
     for attempt in range(MAX_EVALUATOR_RETRIES):
         chat_history = [
-            {'role': 'system', 'content': 'You are a precise Data Visualization Reviewer. You analyze charts for visual honesty and provide technical feedback on Python code.'}
+            {'role': 'system', 'content': load_prompt("evaluator_system.md")}
         ]
         
         def save_log():
@@ -34,7 +47,7 @@ def evaluate_chart_with_history(strategy_text, code_text, image_paths, claim_a, 
                     f.write(f"=== {role} ===\n{content}\n\n")
         
         # Turn 1: Blind Analysis & Incoherence Filter
-        prompt_1 = f"You are an expert Data Visualization Reviewer. Look at the two provided chart images (the first attached is Image 1, the second is Image 2).\n\nTwo claims have been written about these charts (one is honest, one is deceptive):\n- Claim A: {claim_a}\n- Claim B: {claim_b}\n\nTask:\n1. Figure out which image goes with which claim.\n2. Evaluate if there is successful visual deception. True deception is subtle and misleading. Incoherence (unreadable text, overlapping elements, broken axes, or obvious glitches) is NOT true deception, it is just a broken chart.\n\nBased on a 3-second glance, is one of the charts successfully and subtly deceptive? Or is it just honest, or perhaps incoherent/glitchy?"
+        prompt_1 = load_prompt("evaluator_turn1.md", claim_a=claim_a, claim_b=claim_b)
         chat_history.append({'role': 'user', 'content': prompt_1, 'images': image_paths})
         
         print("      > Turn 1: Blind Analysis & Incoherence Check...")
@@ -42,7 +55,7 @@ def evaluate_chart_with_history(strategy_text, code_text, image_paths, claim_a, 
         chat_history.append(response_1.get('message', getattr(response_1, 'message', {})))
         
         # Turn 2: Idea / Strategy Evaluation
-        prompt_2 = f"Now, here is the intended deceptive strategy (the idea) that was supposed to guide the chart's creation:\n\n=== STRATEGY ===\n{strategy_text}\n================\n\nTask:\n1. Does the strategy actually match what is visually present in the images? If the code generated charts that have nothing to do with the requested strategy, that is an EXECUTION ISSUE.\n2. If you already determined in Turn 1 that the chart was successfully deceptive and matches the strategy, acknowledge that the idea worked.\n3. However, if the chart was NOT deceptive (e.g., it was honest, or it was incoherent/glitchy), evaluate this strategy. Is the idea itself fundamentally flawed, impossible, or inherently not deceptive? If the idea is bad, state that this is an IDEA ISSUE. If the idea is actually good and viable but the execution was just poor, state that it is an EXECUTION ISSUE.\n\nCRITICAL: You must end your response with EXACTLY ONE of these tags:\n[IDEA WORKED] - if the chart is successfully deceptive and matches the strategy.\n[IDEA ISSUE] - if the strategy is fundamentally flawed.\n[EXECUTION ISSUE] - if the strategy is good but the execution/code failed to deceive."
+        prompt_2 = load_prompt("evaluator_turn2.md", strategy_text=strategy_text)
         chat_history.append({'role': 'user', 'content': prompt_2})
         
         print("      > Turn 2: Idea Evaluation & Strategy Alignment...")
@@ -62,7 +75,7 @@ def evaluate_chart_with_history(strategy_text, code_text, image_paths, claim_a, 
             continue
         
         # Turn 3: Code Evaluation & Final Verdict
-        prompt_3 = f"The Python script below generated the charts. It failed to achieve the deceptive effect you expected.\n\n=== PYTHON SCRIPT ===\n{code_text}\n\nTask: Identify the bug in this script that prevented the visual deception from working, and provide specific instructions on how to fix it."
+        prompt_3 = load_prompt("evaluator_turn3.md", code_text=code_text)
         chat_history.append({'role': 'user', 'content': prompt_3})
         
         print("      > Turn 3: Final Verdict (Code Fixes)...")
@@ -82,35 +95,28 @@ def main():
     original_cwd = os.getcwd()
     
     # Default to the deception taxonomy taxonomy
-    topic_path = "prompts/deception_taxonomy.md"
+    topic_path = PROMPTS_DIR / "deception_taxonomy.md"
     # If an argument is provided, treat it as extra instructions
     extra_instructions = sys.argv[1] if len(sys.argv) > 1 else ""
-
-    system_file = "prompts/system.md"
 
     categories = ["Statistics", "Encoding", "Container", "Styling"]
     formats = ["Heatmap", "Waterfall Chart", "Violin Plot", "Lollipop Chart", "Radar Chart", "Slope Graph", "Hexbin Plot", "Bubble Chart", "Treemap", "Density Plot", "Mosaic Plot", "Standard Bar Chart", "Standard Line Chart", "Scatter Plot", "Pie Chart"]
 
-    if os.path.isfile(topic_path):
+    if topic_path.exists():
         print(f"🎯 Reading prompt from file: {topic_path}")
         with open(topic_path, 'r', encoding='utf-8') as f:
             topic_text = f.read()
         
-        basename = os.path.basename(topic_path)
-        name_without_ext = os.path.splitext(basename)[0]
+        basename = topic_path.name
+        name_without_ext = topic_path.stem
         safe_topic = re.sub(r'[^a-zA-Z0-9\-_]', '', name_without_ext).lower()[:20]
     else:
         print(f"🎯 Topic specified: {topic_path}")
-        topic_text = topic_path
-        safe_topic = re.sub(r'[^a-zA-Z0-9 \-_]', '', topic_path).replace(' ', '_').lower()[:20]
+        topic_text = str(topic_path)
+        safe_topic = re.sub(r'[^a-zA-Z0-9 \-_]', '', str(topic_path)).replace(' ', '_').lower()[:20]
 
-    # 1. Verify system file exists
-    if not os.path.isfile(system_file):
-        print(f"❌ Error: System prompt {system_file} not found.")
-        sys.exit(1)
-
-    system_path = Path(system_file).resolve()
-    idea_generator_path = Path("prompts/idea_generator.md").resolve()
+    system_path = PROMPTS_DIR / "code_generator.md"
+    idea_generator_path = PROMPTS_DIR / "idea_generator.md"
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     date_str = datetime.datetime.now().strftime("%Y%m%d")
@@ -159,7 +165,8 @@ def main():
             
             if missing_keys:
                 print(f"⚠️ Strategy missing required fields: {', '.join(missing_keys)}. Retrying...")
-                idea_history += f"\n\n--- PREVIOUS ATTEMPT FAILED FORMATTING ---\nMissing keys: {', '.join(missing_keys)}\nPlease ensure all required fields are present in your output."
+                error_msg = load_prompt("error_strategy_format.md", missing_keys=", ".join(missing_keys))
+                idea_history += f"\n\n{error_msg}"
                 continue
             else:
                 break
@@ -255,8 +262,9 @@ def main():
                 
                 if not run_success or not images_exist:
                     print("❌ Code execution failed or images not generated.")
-                    error_msg = execution_output if not run_success else "Images not found after execution."
-                    code_history += f"\n\n--- PREVIOUS ATTEMPT FAILED ---\nCode:\n{generated_code}\nExecution Output:\n{error_msg}\nPlease fix the errors and provide ONLY the raw, working python code."
+                    error_out = execution_output if not run_success else "Images not found after execution."
+                    error_msg = load_prompt("error_code_execution.md", generated_code=generated_code, error_msg=error_out)
+                    code_history += f"\n\n{error_msg}"
                     continue
                 else:
                     break
@@ -286,7 +294,7 @@ def main():
                 image_paths = [honest_png, deceptive_png]
                 random.shuffle(image_paths)
     
-                print("👁️  Calling Evaluator Agent (gemma4:e2b) via 3-Turn Chat...")
+                print("👁️  Calling Evaluator Agent (" + OLLAMA_MODEL + ") via 3-Turn Chat...")
                 # We pass both image paths (shuffled) and claims (shuffled) for blinded analysis
                 evaluator_output = evaluate_chart_with_history(content, generated_code, image_paths, claim_a, claim_b, "evaluator_log.txt")
                 print(f"⚖️  Evaluator Output:\n{evaluator_output}")
@@ -309,17 +317,20 @@ def main():
                     break # Break code loop
                 elif "STRATEGY_ERROR" in evaluator_output:
                     reason = evaluator_output.split("STRATEGY_ERROR", 1)[-1].lstrip(":- \n")
-                    idea_history += f"\n\n--- PREVIOUS ATTEMPT FAILED ---\nStrategy:\n{content}\nEvaluator Feedback:\n{reason}\nPlease provide a fundamentally different and improved strategy."
+                    error_msg = load_prompt("error_strategy_eval.md", strategy=content, reason=reason)
+                    idea_history += f"\n\n{error_msg}"
                     archive_files(strategy_revision, code_revision, move_strategy=True)
                     break # Break code loop and retry strategy loop
                 elif "CODE_ERROR" in evaluator_output:
                     reason = evaluator_output.split("CODE_ERROR", 1)[-1].lstrip(":- \n")
-                    code_history += f"\n\n--- PREVIOUS ATTEMPT FAILED ---\nCode:\n{generated_code}\nExecution Output:\n{execution_output}\nEvaluator Feedback:\n{reason}\nPlease fix the code."
+                    error_msg = load_prompt("error_code_eval.md", generated_code=generated_code, execution_output=execution_output, reason=reason)
+                    code_history += f"\n\n{error_msg}"
                     archive_files(strategy_revision, code_revision, move_strategy=False)
                     # Continues to next code_revision
                 else:
                     print("⚠️ Evaluator returned an unrecognized prefix. Treating as CODE_ERROR.")
-                    code_history += f"\n\n--- PREVIOUS ATTEMPT FAILED ---\nCode:\n{generated_code}\nExecution Output:\n{execution_output}\nEvaluator Feedback:\n{evaluator_output}\nPlease fix the code based on the feedback."
+                    error_msg = load_prompt("error_code_eval.md", generated_code=generated_code, execution_output=execution_output, reason=evaluator_output) # Reusing error_code_eval as fallback
+                    code_history += f"\n\n{error_msg}"
                     archive_files(strategy_revision, code_revision, move_strategy=False)
     
         else:

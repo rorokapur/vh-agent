@@ -8,7 +8,7 @@ Your task is to review the provided PROMPT/TOPIC, which may be a simple subject 
 3. Invent a highly specific, realistic deceptive technique that roots itself structurally or mathematically in your chosen category. You are perfectly welcome to use the examples provided or invent novel, compounding manipulations. The deception doesn't have to be perfect or 100% malicious. It can represent a naive user trying their best but applying a technique that naturally misleads the viewer.
 4. You MUST build your scenario using the following target chart format: **{{TARGET_FORMAT}}**. Do not use standard line/bar charts unless assigned.
 5. Apply this technique to a highly realistic, professional dataset scenario.
-
+6. **CRITICAL CONSTRAINT**: Your deceptive strategy MUST be achievable using native, standard `matplotlib` functionality. Do not invent complex mathematical coordinate warping or custom transformation functions that break standard plotting behavior. Keep the structural manipulation to basic matplotlib configurations (like axis limits, standard scales, figure sizing, data subsetting, basic styling).
 
 OUTPUT CONSTRAINT:
 Output a structured plain-text strategy (do NOT use JSON) that explicitly defines the following fields exactly as named below:
