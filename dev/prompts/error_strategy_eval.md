@@ -3,4 +3,4 @@ Strategy:
 {{STRATEGY}}
 Evaluator Feedback:
 {{REASON}}
-Please provide a fundamentally different and improved strategy.
+Please provide an improved strategy that addresses the identified issues. If this requires significantly deviating from the original strategy, that is acceptable.

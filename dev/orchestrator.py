@@ -27,16 +27,16 @@ def load_prompt(filename, **kwargs):
         text = text.replace(f"{{{{{k.upper()}}}}}", str(v))
     return text.strip()
 
-GEMINI_MODEL = "gemini-3.1-flash-lite-preview"
+GEMINI_MODEL = "gemini-3.1-pro-preview"
 OLLAMA_MODEL = "gemma4:e4b"
 
-def evaluate_chart_with_history(strategy_text, code_text, image_paths, claim_a, claim_b, log_path="evaluator_log.txt"):
+def evaluate_chart_with_history(taxonomy_text, strategy_text, code_text, image_paths, claim_a, claim_b, log_path="evaluator_log.txt"):
     import ollama  # type: ignore
     import re
     
     for attempt in range(MAX_EVALUATOR_RETRIES):
         chat_history = [
-            {'role': 'system', 'content': load_prompt("evaluator_system.md")}
+            {'role': 'system', 'content': load_prompt("evaluator_system.md", taxonomy=taxonomy_text)}
         ]
         
         def save_log():
@@ -56,7 +56,7 @@ def evaluate_chart_with_history(strategy_text, code_text, image_paths, claim_a, 
         
         # Turn 2: Idea / Strategy Evaluation
         prompt_2 = load_prompt("evaluator_turn2.md", strategy_text=strategy_text)
-        chat_history.append({'role': 'user', 'content': prompt_2})
+        chat_history.append({'role': 'user', 'content': prompt_2, 'images': image_paths})
         
         print("      > Turn 2: Idea Evaluation & Strategy Alignment...")
         response_2 = ollama.chat(model=OLLAMA_MODEL, messages=chat_history)
@@ -76,7 +76,7 @@ def evaluate_chart_with_history(strategy_text, code_text, image_paths, claim_a, 
         
         # Turn 3: Code Evaluation & Final Verdict
         prompt_3 = load_prompt("evaluator_turn3.md", code_text=code_text)
-        chat_history.append({'role': 'user', 'content': prompt_3})
+        chat_history.append({'role': 'user', 'content': prompt_3, 'images': image_paths})
         
         print("      > Turn 3: Final Verdict (Code Fixes)...")
         response_3 = ollama.chat(model=OLLAMA_MODEL, messages=chat_history)
@@ -296,7 +296,7 @@ def main():
     
                 print("👁️  Calling Evaluator Agent (" + OLLAMA_MODEL + ") via 3-Turn Chat...")
                 # We pass both image paths (shuffled) and claims (shuffled) for blinded analysis
-                evaluator_output = evaluate_chart_with_history(content, generated_code, image_paths, claim_a, claim_b, "evaluator_log.txt")
+                evaluator_output = evaluate_chart_with_history(topic_text, content, generated_code, image_paths, claim_a, claim_b, "evaluator_log.txt")
                 print(f"⚖️  Evaluator Output:\n{evaluator_output}")
     
                 # Archiving helper function
