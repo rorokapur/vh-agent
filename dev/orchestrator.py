@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 import random
 
+os.environ["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
+
 MAX_STRATEGY_REVISIONS = 10
 MAX_STRATEGY_RETRIES = 3
 MAX_CODE_RETRIES = 3
@@ -27,13 +29,64 @@ def load_prompt(filename, **kwargs):
         text = text.replace(f"{{{{{k.upper()}}}}}", str(v))
     return text.strip()
 
-GEMINI_MODEL = "gemini-3.1-pro-preview"
-OLLAMA_MODEL = "gemma4:e4b"
+GEMINI_MODEL = "gemini-3-flash-preview"
+OLLAMA_MODEL = "gemma4:26b"
 
 def evaluate_chart_with_history(taxonomy_text, strategy_text, code_text, image_paths, claim_a, claim_b, log_path="evaluator_log.txt"):
     import ollama  # type: ignore
     import re
-    
+
+    def _get_content(response):
+        """Extract text content from an ollama response object."""
+        if hasattr(response, 'message') and hasattr(response.message, 'content'):
+            return response.message.content
+        return response.get('message', {}).get('content', '')
+
+    def _get_message(response):
+        """Extract the message dict/object from an ollama response for chat history."""
+        return response.get('message', getattr(response, 'message', {}))
+
+    def _stream_chat(model, messages):
+        """Stream chat response from ollama and print to console in historical style."""
+        full_content = ""
+        full_message = {'role': 'assistant', 'content': ''}
+        
+        # ANSI escape codes from historical agent_runner.py
+        DIM = '\033[2m'
+        CYAN = '\033[96m'
+        ENDC = '\033[0m'
+        
+        in_thinking = False
+        first_answer_token = True
+        
+        for chunk in ollama.chat(model=model, messages=messages, stream=True):
+            # 1. Handle the reasoning/thinking trace (native field)
+            thinking = getattr(chunk.message, 'thinking', None) or chunk.get('message', {}).get('thought', '')
+            if thinking:
+                if not in_thinking:
+                    print(f'\n        {DIM}--- Thinking ---\n        ', end='')
+                    in_thinking = True
+                print(thinking, end='', flush=True)
+                continue
+
+            # 2. Handle the content / final answer
+            content = getattr(chunk.message, 'content', None) or chunk.get('message', {}).get('content', '')
+            if content:
+                if in_thinking:
+                    print(f'{ENDC}\n\n        {CYAN}--- Final Answer ---\n        ', end='')
+                    in_thinking = False
+                    first_answer_token = False
+                elif first_answer_token:
+                    print(f'\n        {CYAN}--- Final Answer ---\n        ', end='')
+                    first_answer_token = False
+                
+                print(content, end='', flush=True)
+                full_content += content
+        
+        print(f'{ENDC}\n')
+        full_message['content'] = full_content
+        return full_message
+
     for attempt in range(MAX_EVALUATOR_RETRIES):
         chat_history = [
             {'role': 'system', 'content': load_prompt("evaluator_system.md", taxonomy=taxonomy_text)}
@@ -45,49 +98,84 @@ def evaluate_chart_with_history(taxonomy_text, strategy_text, code_text, image_p
                     role = turn.get('role', 'unknown').upper()
                     content = turn.get('content', '')
                     f.write(f"=== {role} ===\n{content}\n\n")
-        
-        # Turn 1: Blind Analysis & Incoherence Filter
-        prompt_1 = load_prompt("evaluator_turn1.md", claim_a=claim_a, claim_b=claim_b)
+
+        # ═══════════════════════════════════════════════════════════
+        # PHASE A: Code Validation (failures → Code Agent)
+        # ═══════════════════════════════════════════════════════════
+
+        # ── Turn 1: The Blind Witness (No Gate) ──
+        prompt_1 = load_prompt("evaluator_turn1_witness.md")
         chat_history.append({'role': 'user', 'content': prompt_1, 'images': image_paths})
         
-        print("      > Turn 1: Blind Analysis & Incoherence Check...")
-        response_1 = ollama.chat(model=OLLAMA_MODEL, messages=chat_history)
-        chat_history.append(response_1.get('message', getattr(response_1, 'message', {})))
-        
-        # Turn 2: Idea / Strategy Evaluation
-        prompt_2 = load_prompt("evaluator_turn2.md", strategy_text=strategy_text)
+        print("      > Turn 1: Blind Witness...")
+        msg_1 = _stream_chat(model=OLLAMA_MODEL, messages=chat_history)
+        chat_history.append(msg_1)
+        # No routing — append response and proceed directly to Turn 2.
+
+        # ── Turn 2: Strategy Verification (Code Gate) ──
+        prompt_2 = load_prompt("evaluator_turn2_code.md", strategy_text=strategy_text, code_text=code_text)
         chat_history.append({'role': 'user', 'content': prompt_2, 'images': image_paths})
         
-        print("      > Turn 2: Idea Evaluation & Strategy Alignment...")
-        response_2 = ollama.chat(model=OLLAMA_MODEL, messages=chat_history)
-        chat_history.append(response_2.get('message', getattr(response_2, 'message', {})))
+        print("      > Turn 2: Strategy Verification (Code Gate) Reasoning...")
+        msg_2 = _stream_chat(model=OLLAMA_MODEL, messages=chat_history)
+        chat_history.append(msg_2)
         
-        turn_2_text = response_2.get('message', {}).get('content', '').upper()
-        if "[IDEA WORKED]" in turn_2_text:
+        # ── Turn 2.5: Code Gate Labeler ──
+        prompt_2_label = load_prompt("evaluator_label_code.md")
+        chat_history.append({'role': 'user', 'content': prompt_2_label})
+        
+        print("      > Turn 2.5: Code Gate Labeler...")
+        msg_2_label = _stream_chat(model=OLLAMA_MODEL, messages=chat_history)
+        chat_history.append(msg_2_label)
+        
+        turn_2_text = msg_2_label.get('content', '')
+        turn_2_upper = turn_2_text.upper()
+        
+        if "[CODE FAIL" in turn_2_upper:
+            reason = msg_2.get('content', '').strip()
+            save_log()
+            return f"CODE_ERROR: The code failed to apply the requested strategy.\n\nEvaluator Reasoning:\n{reason}"
+        elif "[CODE PASS]" not in turn_2_upper:
+            save_log() # Added logging for debugging
+            print(f"      > Turn 2 formatting failed, retrying evaluation ({attempt + 1}/{MAX_EVALUATOR_RETRIES})...")
+            continue
+
+        # ═══════════════════════════════════════════════════════════
+        # PHASE B: Concept Validation (failures → Idea Agent)
+        # ═══════════════════════════════════════════════════════════
+
+        # ── Turn 3: Claim Match & Idea Feedback (Idea Gate) ──
+        prompt_4 = load_prompt("evaluator_turn4_idea.md", claim_a=claim_a, claim_b=claim_b)
+        chat_history.append({'role': 'user', 'content': prompt_4, 'images': image_paths})
+        
+        print("      > Turn 3: Claim Match & Idea Feedback (Idea Gate) Reasoning...")
+        msg_4 = _stream_chat(model=OLLAMA_MODEL, messages=chat_history)
+        chat_history.append(msg_4)
+        
+        # ── Turn 3.5: Idea Gate Labeler ──
+        prompt_4_label = load_prompt("evaluator_label_idea.md")
+        chat_history.append({'role': 'user', 'content': prompt_4_label})
+        
+        print("      > Turn 3.5: Idea Gate Labeler...")
+        msg_4_label = _stream_chat(model=OLLAMA_MODEL, messages=chat_history)
+        chat_history.append(msg_4_label)
+        
+        turn_4_text = msg_4_label.get('content', '')
+        turn_4_upper = turn_4_text.upper()
+        
+        if "[IDEA FAIL" in turn_4_upper:
+            reason = msg_4.get('content', '').strip()
+            save_log()
+            return f"STRATEGY_ERROR: The strategy failed to visually communicate the claim.\n\nEvaluator Reasoning:\n{reason}"
+        elif "[IDEA PASS]" in turn_4_upper:
             save_log()
             return "PASS"
-        elif "[IDEA ISSUE]" in turn_2_text:
-            save_log()
-            reason = response_2.get('message', {}).get('content', '')
-            return f"STRATEGY_ERROR: {reason}"
-        elif "[EXECUTION ISSUE]" not in turn_2_text:
-            print(f"      > Evaluator formatting failed, retrying evaluation ({attempt + 1}/{MAX_EVALUATOR_RETRIES})...")
+        else:
+            save_log() # Save log even on formatting failure for debugging
+            print(f"      > Turn 4 formatting failed, retrying evaluation ({attempt + 1}/{MAX_EVALUATOR_RETRIES})...")
             continue
         
-        # Turn 3: Code Evaluation & Final Verdict
-        prompt_3 = load_prompt("evaluator_turn3.md", code_text=code_text)
-        chat_history.append({'role': 'user', 'content': prompt_3, 'images': image_paths})
-        
-        print("      > Turn 3: Final Verdict (Code Fixes)...")
-        response_3 = ollama.chat(model=OLLAMA_MODEL, messages=chat_history)
-        chat_history.append(response_3.get('message', getattr(response_3, 'message', {})))
-        
-        save_log()
-        
-        final_output = getattr(response_3.message, 'content', '') if hasattr(response_3, 'message') else response_3.get('message', {}).get('content', '')
-        
-        return f"CODE_ERROR: {final_output.strip()}"
-        
+    save_log() # Final log save before exit
     print(f"❌ Evaluator failed to output a valid tag format after {MAX_EVALUATOR_RETRIES} retries. Giving up.")
     sys.exit(1)
 
@@ -155,7 +243,8 @@ def main():
             result = subprocess.run(
                 ["gemini", "-m", GEMINI_MODEL],
                 input=idea_history.encode('utf-8'),
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 check=True
             )
             content = result.stdout.decode('utf-8').strip()
@@ -228,6 +317,7 @@ def main():
                         ["gemini", "-m", GEMINI_MODEL],
                         input=gemini_code_input.encode('utf-8'),
                         stdout=out_f,
+                        stderr=subprocess.DEVNULL,
                         check=True
                     )
                 
@@ -294,7 +384,7 @@ def main():
                 image_paths = [honest_png, deceptive_png]
                 random.shuffle(image_paths)
     
-                print("👁️  Calling Evaluator Agent (" + OLLAMA_MODEL + ") via 3-Turn Chat...")
+                print("👁️  Calling Evaluator Agent (" + OLLAMA_MODEL + ") via 4-Turn State Machine...")
                 # We pass both image paths (shuffled) and claims (shuffled) for blinded analysis
                 evaluator_output = evaluate_chart_with_history(topic_text, content, generated_code, image_paths, claim_a, claim_b, "evaluator_log.txt")
                 print(f"⚖️  Evaluator Output:\n{evaluator_output}")
@@ -311,18 +401,17 @@ def main():
                             shutil.move(f, os.path.join(archive_dir, f))
         
                 # Routing Logic based on Evaluator Output
-                evaluator_output_upper = evaluator_output.strip().upper()
-                if evaluator_output_upper.startswith("PASS") or "PASS\n" in evaluator_output_upper or evaluator_output_upper == "PASS":
+                if evaluator_output.strip() == "PASS":
                     overall_pass = True
                     break # Break code loop
-                elif "STRATEGY_ERROR" in evaluator_output:
-                    reason = evaluator_output.split("STRATEGY_ERROR", 1)[-1].lstrip(":- \n")
+                elif evaluator_output.startswith("STRATEGY_ERROR:"):
+                    reason = evaluator_output.split("STRATEGY_ERROR:", 1)[-1].strip()
                     error_msg = load_prompt("error_strategy_eval.md", strategy=content, reason=reason)
                     idea_history += f"\n\n{error_msg}"
                     archive_files(strategy_revision, code_revision, move_strategy=True)
                     break # Break code loop and retry strategy loop
-                elif "CODE_ERROR" in evaluator_output:
-                    reason = evaluator_output.split("CODE_ERROR", 1)[-1].lstrip(":- \n")
+                elif evaluator_output.startswith("CODE_ERROR:"):
+                    reason = evaluator_output.split("CODE_ERROR:", 1)[-1].strip()
                     error_msg = load_prompt("error_code_eval.md", generated_code=generated_code, execution_output=execution_output, reason=reason)
                     code_history += f"\n\n{error_msg}"
                     archive_files(strategy_revision, code_revision, move_strategy=False)
