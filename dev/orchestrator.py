@@ -28,66 +28,200 @@ def load_prompt(filename, **kwargs):
     return text.strip()
 
 GEMINI_MODEL = "gemini-3.1-pro-preview"
+os.environ["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
 OLLAMA_MODEL = "gemma4:e4b"
 
-def evaluate_chart_with_history(taxonomy_text, strategy_text, code_text, image_paths, claim_a, claim_b, log_path="evaluator_log.txt"):
+def _extract_strategy_field(strategy_text, field_name):
+    """Extract a named field value from the plain-text strategy document."""
+    pattern = rf"{field_name}:\s*(.+?)(?:\n[a-z_]+:|$)"
+    match = re.search(pattern, strategy_text, re.DOTALL | re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def _ollama_call(prompt_text, images=None):
+    """Single-shot Ollama call. Returns the response content string."""
     import ollama  # type: ignore
+    msg = {'role': 'user', 'content': prompt_text}
+    if images:
+        msg['images'] = images
+    resp = ollama.chat(model=OLLAMA_MODEL, messages=[msg])
+    text = resp.get('message', getattr(resp, 'message', {}))
+    return text.get('content', '') if isinstance(text, dict) else getattr(text, 'content', '')
+
+
+def evaluate_chart_with_history(taxonomy_text, strategy_text, code_text, image_paths, claim_a, claim_b, log_path="evaluator_log.txt"):
+    """Multi-step, double-blind evaluation pipeline with granular routing.
+
+    Step 1  — Parallel blind extraction (no deception context).
+    Step 2a — Claim match check (do interpretations match goals?).
+      ├─ MATCH   → Step 3: Side-by-side deception check.
+      └─ MISMATCH → Step 2b: Strategy soundness check.
+           ├─ SOUND  → Step 2c: Code review (targeted feedback) → CODE_ERROR.
+           └─ FLAWED → STRATEGY_ERROR (idea feedback).
+    Step 3  — Side-by-side deception check (only on MATCH).
+    """
     import re
-    
+    import concurrent.futures
+    import ollama  # type: ignore
+
+    # Pull structured fields from the strategy text
+    global_reality = _extract_strategy_field(strategy_text, "global_reality")
+    local_narrative = _extract_strategy_field(strategy_text, "local_narrative")
+    deception_technique = _extract_strategy_field(strategy_text, "deception_technique")
+    visual_trick_plan = _extract_strategy_field(strategy_text, "visual_trick_plan")
+
+    # Re-identify canonical paths from filenames (caller may have shuffled)
+    honest_path = next((p for p in image_paths if "_honest" in p), image_paths[0])
+    deceptive_path = next((p for p in image_paths if "_deceptive" in p), image_paths[1])
+
+    log_entries = []
+
+    def append_log(label, content):
+        log_entries.append(f"=== {label} ===\n{content}\n")
+
+    def save_log():
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(log_entries))
+
     for attempt in range(MAX_EVALUATOR_RETRIES):
-        chat_history = [
-            {'role': 'system', 'content': load_prompt("evaluator_system.md", taxonomy=taxonomy_text)}
-        ]
-        
-        def save_log():
-            with open(log_path, "w", encoding='utf-8') as f:
-                for turn in chat_history:
-                    role = turn.get('role', 'unknown').upper()
-                    content = turn.get('content', '')
-                    f.write(f"=== {role} ===\n{content}\n\n")
-        
-        # Turn 1: Blind Analysis & Incoherence Filter
-        prompt_1 = load_prompt("evaluator_turn1.md", claim_a=claim_a, claim_b=claim_b)
-        chat_history.append({'role': 'user', 'content': prompt_1, 'images': image_paths})
-        
-        print("      > Turn 1: Blind Analysis & Incoherence Check...")
-        response_1 = ollama.chat(model=OLLAMA_MODEL, messages=chat_history)
-        chat_history.append(response_1.get('message', getattr(response_1, 'message', {})))
-        
-        # Turn 2: Idea / Strategy Evaluation
-        prompt_2 = load_prompt("evaluator_turn2.md", strategy_text=strategy_text)
-        chat_history.append({'role': 'user', 'content': prompt_2, 'images': image_paths})
-        
-        print("      > Turn 2: Idea Evaluation & Strategy Alignment...")
-        response_2 = ollama.chat(model=OLLAMA_MODEL, messages=chat_history)
-        chat_history.append(response_2.get('message', getattr(response_2, 'message', {})))
-        
-        turn_2_text = response_2.get('message', {}).get('content', '').upper()
-        if "[IDEA WORKED]" in turn_2_text:
-            save_log()
-            return "PASS"
-        elif "[IDEA ISSUE]" in turn_2_text:
-            save_log()
-            reason = response_2.get('message', {}).get('content', '')
-            return f"STRATEGY_ERROR: {reason}"
-        elif "[EXECUTION ISSUE]" not in turn_2_text:
-            print(f"      > Evaluator formatting failed, retrying evaluation ({attempt + 1}/{MAX_EVALUATOR_RETRIES})...")
+        log_entries.clear()
+
+        # ── Step 1: Double-Blind Visual Extraction (parallel) ────────────
+        blind_prompt = load_prompt("evaluator_blind_extraction.md")
+        append_log("STEP 1 PROMPT (sterile, shared)", blind_prompt)
+
+        def _blind_call(img_path, label):
+            """Run a single blind extraction call."""
+            messages = [
+                {'role': 'user', 'content': blind_prompt, 'images': [img_path]}
+            ]
+            resp = ollama.chat(model=OLLAMA_MODEL, messages=messages)
+            text = resp.get('message', getattr(resp, 'message', {}))
+            content = text.get('content', '') if isinstance(text, dict) else getattr(text, 'content', '')
+            return label, content
+
+        print("      > Step 1: Double-Blind Visual Extraction (parallel)...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(_blind_call, honest_path, "reality"),
+                pool.submit(_blind_call, deceptive_path, "narrative"),
+            ]
+            results = {}
+            for fut in concurrent.futures.as_completed(futures):
+                label, content = fut.result()
+                results[label] = content
+
+        reality_interpretation = results["reality"]
+        narrative_interpretation = results["narrative"]
+
+        append_log("STEP 1 — REALITY INTERPRETATION (Image A / honest)", reality_interpretation)
+        append_log("STEP 1 — NARRATIVE INTERPRETATION (Image B / deceptive)", narrative_interpretation)
+
+        # ── Step 2a: Claim Match Check (text-only) ───────────────────────
+        prompt_2a = load_prompt(
+            "evaluator_claim_match.md",
+            reality_interpretation=reality_interpretation,
+            narrative_interpretation=narrative_interpretation,
+            global_reality=global_reality,
+            local_narrative=local_narrative,
+        )
+        append_log("STEP 2a PROMPT", prompt_2a)
+
+        print("      > Step 2a: Claim Match Check...")
+        step2a_content = _ollama_call(prompt_2a)
+        append_log("STEP 2a RESPONSE", step2a_content)
+
+        step2a_upper = step2a_content.upper()
+
+        if "[MATCH]" in step2a_upper:
+            # Claims aligned → proceed to deception check (Step 3)
+            pass
+        elif "[MISMATCH]" in step2a_upper:
+            # Claims didn't align → diagnose: strategy or code?
+
+            # ── Step 2b: Strategy Soundness Check (text-only) ────────────
+            prompt_2b = load_prompt(
+                "evaluator_strategy_check.md",
+                global_reality=global_reality,
+                local_narrative=local_narrative,
+                deception_technique=deception_technique,
+                visual_trick_plan=visual_trick_plan,
+            )
+            append_log("STEP 2b PROMPT", prompt_2b)
+
+            print("      > Step 2b: Strategy Soundness Check...")
+            step2b_content = _ollama_call(prompt_2b)
+            append_log("STEP 2b RESPONSE", step2b_content)
+
+            step2b_upper = step2b_content.upper()
+
+            if "[STRATEGY FLAWED" in step2b_upper:
+                # Idea is broken → route to idea generator
+                reason_match = re.search(r"\[STRATEGY FLAWED[:\s]*(.+?)\]", step2b_content, re.IGNORECASE | re.DOTALL)
+                reason = reason_match.group(1).strip() if reason_match else step2b_content.strip()
+                save_log()
+                return f"STRATEGY_ERROR: {reason}"
+            elif "[STRATEGY VAGUE" in step2b_upper:
+                # Idea is conceptually valid but too vague to implement → route to idea generator
+                reason_match = re.search(r"\[STRATEGY VAGUE[:\s]*(.+?)\]", step2b_content, re.IGNORECASE | re.DOTALL)
+                reason = reason_match.group(1).strip() if reason_match else step2b_content.strip()
+                save_log()
+                return f"STRATEGY_ERROR: Strategy is too vague — {reason}"
+            elif "[STRATEGY SOUND]" in step2b_upper:
+                # Strategy is fine, code is the problem → get code feedback
+
+                # ── Step 2c: Code Review (text-only) ─────────────────────
+                prompt_2c = load_prompt(
+                    "evaluator_code_review.md",
+                    global_reality=global_reality,
+                    local_narrative=local_narrative,
+                    deception_technique=deception_technique,
+                    visual_trick_plan=visual_trick_plan,
+                    reality_interpretation=reality_interpretation,
+                    narrative_interpretation=narrative_interpretation,
+                    code_text=code_text,
+                )
+                append_log("STEP 2c PROMPT", prompt_2c)
+
+                print("      > Step 2c: Code Review...")
+                step2c_content = _ollama_call(prompt_2c)
+                append_log("STEP 2c RESPONSE", step2c_content)
+
+                save_log()
+                return f"CODE_ERROR: {step2c_content.strip()}"
+            else:
+                print(f"      > Step 2b formatting failed, retrying evaluation ({attempt + 1}/{MAX_EVALUATOR_RETRIES})...")
+                continue
+        else:
+            print(f"      > Step 2a formatting failed, retrying evaluation ({attempt + 1}/{MAX_EVALUATOR_RETRIES})...")
             continue
-        
-        # Turn 3: Code Evaluation & Final Verdict
-        prompt_3 = load_prompt("evaluator_turn3.md", code_text=code_text)
-        chat_history.append({'role': 'user', 'content': prompt_3, 'images': image_paths})
-        
-        print("      > Turn 3: Final Verdict (Code Fixes)...")
-        response_3 = ollama.chat(model=OLLAMA_MODEL, messages=chat_history)
-        chat_history.append(response_3.get('message', getattr(response_3, 'message', {})))
-        
+
+        # ── Step 3: Side-by-Side Deception Check (both images, context revealed) ─
+        prompt_3 = load_prompt(
+            "evaluator_deception_check.md",
+            deception_technique=deception_technique,
+            global_reality=global_reality,
+            local_narrative=local_narrative,
+        )
+        append_log("STEP 3 PROMPT", prompt_3)
+
+        print("      > Step 3: Side-by-Side Deception Check...")
+        step3_content = _ollama_call(prompt_3, images=[honest_path, deceptive_path])
+        append_log("STEP 3 RESPONSE", step3_content)
+
         save_log()
-        
-        final_output = getattr(response_3.message, 'content', '') if hasattr(response_3, 'message') else response_3.get('message', {}).get('content', '')
-        
-        return f"CODE_ERROR: {final_output.strip()}"
-        
+
+        step3_upper = step3_content.upper()
+        if "[DECEPTION EFFECTIVE]" in step3_upper:
+            return "PASS"
+        elif "[DECEPTION FAILED" in step3_upper:
+            reason_match = re.search(r"\[DECEPTION FAILED[:\s]*(.+?)\]", step3_content, re.IGNORECASE | re.DOTALL)
+            reason = reason_match.group(1).strip() if reason_match else step3_content.strip()
+            return f"STRATEGY_ERROR: {reason}"
+        else:
+            print(f"      > Step 3 formatting failed, retrying evaluation ({attempt + 1}/{MAX_EVALUATOR_RETRIES})...")
+            continue
+
     print(f"❌ Evaluator failed to output a valid tag format after {MAX_EVALUATOR_RETRIES} retries. Giving up.")
     sys.exit(1)
 
@@ -191,6 +325,7 @@ def main():
             workspace = os.path.join(original_cwd, f"output/{file_prefix}_{timestamp}")
             os.makedirs(workspace, exist_ok=True)
             os.chdir(workspace)
+            os.environ["GEMINI_WORKSPACE"] = workspace
             print(f"🚀 Workspace created: {workspace}")
 
         if extra_instructions:
@@ -294,8 +429,8 @@ def main():
                 image_paths = [honest_png, deceptive_png]
                 random.shuffle(image_paths)
     
-                print("👁️  Calling Evaluator Agent (" + OLLAMA_MODEL + ") via 3-Turn Chat...")
-                # We pass both image paths (shuffled) and claims (shuffled) for blinded analysis
+                print("👁️  Calling Evaluator Agent (" + OLLAMA_MODEL + ") via 3-Step Double-Blind Pipeline...")
+                # image_paths are shuffled, but the evaluator re-identifies from filenames
                 evaluator_output = evaluate_chart_with_history(topic_text, content, generated_code, image_paths, claim_a, claim_b, "evaluator_log.txt")
                 print(f"⚖️  Evaluator Output:\n{evaluator_output}")
     
