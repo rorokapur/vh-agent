@@ -14,6 +14,7 @@ You are a claim-matching engine. You will be given two blind chart interpretatio
 
 TASK:
 Check if one interpretation aligns with the global_reality and the other aligns with the local_narrative. The analyst did not know which image was which, so the mapping can be in either order.
+The interpretations can align without the perceived data values *exactly* matching the intended strategy, so long as the general perceived trends and insights are the same. 
 
 CRITICAL: Your entire response must be a maximum of 2 sentences of reasoning followed by EXACTLY ONE of these tags on the final line:
 [MATCH] - Both interpretations successfully correspond to their respective goals.

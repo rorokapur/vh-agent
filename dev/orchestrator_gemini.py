@@ -11,7 +11,6 @@ import random
 MAX_STRATEGY_REVISIONS = 10
 MAX_STRATEGY_RETRIES = 3
 MAX_CODE_RETRIES = 3
-MAX_CODE_REVISIONS = 5
 MAX_EVALUATOR_RETRIES = 3
 
 PROMPTS_DIR = Path(__file__).parent / "prompts"
@@ -28,116 +27,162 @@ def load_prompt(filename, **kwargs):
     return text.strip()
 
 GEMINI_MODEL = "gemini-3-flash-preview"
+os.environ["GEMINI_CLI_TRUST_WORKSPACE"] = "true"
 
-def call_gemini_text(prompt_text):
-    """Single-shot text generation via Gemini CLI (no images, no system message).
-    Pipes the entire prompt_text to stdin — identical to the original orchestrator."""
+def _extract_strategy_field(strategy_text, field_name):
+    """Extract a named field value from the plain-text strategy document."""
+    pattern = rf"{field_name}:\s*(.+?)(?:\n[a-z_]+:|$)"
+    match = re.search(pattern, strategy_text, re.DOTALL | re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def _gemini_call(prompt_text, images=None):
+    """Single-shot Gemini CLI call. Returns the response content string."""
+    cmd = ["gemini", "-m", GEMINI_MODEL]
+    if images:
+        image_args = " ".join([f"@{os.path.abspath(img)}" for img in images])
+        cmd.extend(["-p", image_args])
+        
     result = subprocess.run(
-        ["gemini", "-m", GEMINI_MODEL],
+        cmd,
         input=prompt_text.encode('utf-8'),
         capture_output=True,
         check=True
     )
     return result.stdout.decode('utf-8').strip()
 
-def call_gemini_with_images(prompt_text, image_paths):
-    """Call Gemini CLI with text prompt and image files.
-    Uses the -p flag with @path syntax so Gemini CLI resolves file references.
-    The text context is piped via stdin, and -p appends the image references."""
-    # Build image references using @path syntax recognized by Gemini CLI
-    image_refs = " ".join(f"@{os.path.abspath(p)}" for p in image_paths)
-    
-    result = subprocess.run(
-        ["gemini", "-m", GEMINI_MODEL, "-p", image_refs],
-        input=prompt_text.encode('utf-8'),
-        capture_output=True,
-        check=True
-    )
-    return result.stdout.decode('utf-8').strip()
 
-def evaluate_chart_with_history(taxonomy_text, strategy_text, code_text, image_paths, claim_a, claim_b, log_path="evaluator_log.txt"):
-    """3-turn evaluator chat via Gemini CLI.
-    
-    Since Gemini CLI doesn't have a native multi-turn chat API, we simulate it by
-    building up the full conversation context as a structured prompt for each turn.
-    Each turn receives the exact same system context, prior turns, and images that
-    the original Ollama evaluator received.
+def evaluate_gauntlet(strategy_text, image_paths, log_path="evaluator_log.txt"):
+    """Sequential Evaluation Gauntlet.
+
+    Runs the image through three checks in order:
+      1. Blind Visual Extraction (parallel) — context-free interpretation of each chart.
+      2. Claim Match — do the blind interpretations match the strategy goals?
+      3. Side-by-Side Deception Check — does the deceptive chart actually deceive?
+
+    Returns a dict with:
+      - verdict: "PASS" or "FAIL"
+      - reality_interpretation: blind extraction for the honest chart
+      - narrative_interpretation: blind extraction for the deceptive chart
+      - failure_reason: string describing why it failed (empty on PASS)
     """
-    import re
-    
-    system_prompt = load_prompt("evaluator_system.md", taxonomy=taxonomy_text)
-    
+    import concurrent.futures
+
+    # Pull structured fields from the strategy text
+    global_reality = _extract_strategy_field(strategy_text, "global_reality")
+    local_narrative = _extract_strategy_field(strategy_text, "local_narrative")
+    deception_technique = _extract_strategy_field(strategy_text, "deception_technique")
+
+    # Re-identify canonical paths from filenames
+    honest_path = next((p for p in image_paths if "_honest" in p), image_paths[0])
+    deceptive_path = next((p for p in image_paths if "_deceptive" in p), image_paths[1])
+
+    log_entries = []
+
+    def append_log(label, content):
+        log_entries.append(f"=== {label} ===\n{content}\n")
+
+    def save_log():
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(log_entries))
+
     for attempt in range(MAX_EVALUATOR_RETRIES):
-        chat_log = []  # For saving the log
-        
-        def save_log():
-            with open(log_path, "w", encoding='utf-8') as f:
-                for turn in chat_log:
-                    f.write(f"=== {turn['role'].upper()} ===\n{turn['content']}\n\n")
-        
-        # ── Turn 1: Blind Analysis & Incoherence Filter ──
-        prompt_1 = load_prompt("evaluator_turn1.md", claim_a=claim_a, claim_b=claim_b)
-        
-        turn_1_input = f"[SYSTEM]\n{system_prompt}\n\n[USER]\n{prompt_1}"
-        
-        chat_log.append({'role': 'system', 'content': system_prompt})
-        chat_log.append({'role': 'user', 'content': prompt_1})
-        
-        print("      > Turn 1: Blind Analysis & Incoherence Check...")
-        response_1 = call_gemini_with_images(turn_1_input, image_paths)
-        chat_log.append({'role': 'assistant', 'content': response_1})
-        
-        # ── Turn 2: Idea / Strategy Evaluation ──
-        prompt_2 = load_prompt("evaluator_turn2.md", strategy_text=strategy_text)
-        
-        # Build full context: system + turn1 + response1 + turn2 (with images re-attached)
-        turn_2_input = (
-            f"[SYSTEM]\n{system_prompt}\n\n"
-            f"[USER]\n{prompt_1}\n\n"
-            f"[ASSISTANT]\n{response_1}\n\n"
-            f"[USER]\n{prompt_2}"
+        log_entries.clear()
+
+        # ── Step 1: Blind Visual Extraction (parallel) ───────────────────
+        blind_prompt = load_prompt("evaluator_blind_extraction.md")
+        append_log("STEP 1 PROMPT (sterile, shared)", blind_prompt)
+
+        def _blind_call(img_path, label):
+            """Run a single blind extraction call."""
+            content = _gemini_call(blind_prompt, images=[img_path])
+            return label, content
+
+        print("      > Step 1: Blind Visual Extraction (parallel)...")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(_blind_call, honest_path, "reality"),
+                pool.submit(_blind_call, deceptive_path, "narrative"),
+            ]
+            results = {}
+            for fut in concurrent.futures.as_completed(futures):
+                label, content = fut.result()
+                results[label] = content
+
+        reality_interpretation = results["reality"]
+        narrative_interpretation = results["narrative"]
+
+        append_log("STEP 1 — REALITY INTERPRETATION (Image A / honest)", reality_interpretation)
+        append_log("STEP 1 — NARRATIVE INTERPRETATION (Image B / deceptive)", narrative_interpretation)
+
+        # ── Step 2: Claim Match Check (text-only) ────────────────────────
+        prompt_2 = load_prompt(
+            "evaluator_claim_match.md",
+            reality_interpretation=reality_interpretation,
+            narrative_interpretation=narrative_interpretation,
+            global_reality=global_reality,
+            local_narrative=local_narrative,
         )
-        
-        chat_log.append({'role': 'user', 'content': prompt_2})
-        
-        print("      > Turn 2: Idea Evaluation & Strategy Alignment...")
-        response_2 = call_gemini_with_images(turn_2_input, image_paths)
-        chat_log.append({'role': 'assistant', 'content': response_2})
-        
-        turn_2_text = response_2.upper()
-        if "[IDEA WORKED]" in turn_2_text:
+        append_log("STEP 2 PROMPT", prompt_2)
+
+        print("      > Step 2: Claim Match Check...")
+        step2_content = _gemini_call(prompt_2)
+        append_log("STEP 2 RESPONSE", step2_content)
+
+        step2_upper = step2_content.upper()
+
+        if "[MATCH]" in step2_upper:
+            # Claims aligned → proceed to deception check (Step 3)
+            pass
+        elif "[MISMATCH]" in step2_upper:
+            # Claims didn't align → immediate FAIL, no routing needed
             save_log()
-            return "PASS"
-        elif "[IDEA ISSUE]" in turn_2_text:
-            save_log()
-            return f"STRATEGY_ERROR: {response_2}"
-        elif "[EXECUTION ISSUE]" not in turn_2_text:
-            print(f"      > Evaluator formatting failed, retrying evaluation ({attempt + 1}/{MAX_EVALUATOR_RETRIES})...")
+            return {
+                "verdict": "FAIL",
+                "reality_interpretation": reality_interpretation,
+                "narrative_interpretation": narrative_interpretation,
+                "failure_reason": f"Claim Match MISMATCH: The blind analyst interpretations did not align with the strategy goals. {step2_content.strip()}",
+            }
+        else:
+            print(f"      > Step 2 formatting failed, retrying evaluation ({attempt + 1}/{MAX_EVALUATOR_RETRIES})...")
             continue
-        
-        # ── Turn 3: Code Evaluation & Final Verdict ──
-        prompt_3 = load_prompt("evaluator_turn3.md", code_text=code_text)
-        
-        # Build full context: system + all prior turns + turn3 (with images re-attached)
-        turn_3_input = (
-            f"[SYSTEM]\n{system_prompt}\n\n"
-            f"[USER]\n{prompt_1}\n\n"
-            f"[ASSISTANT]\n{response_1}\n\n"
-            f"[USER]\n{prompt_2}\n\n"
-            f"[ASSISTANT]\n{response_2}\n\n"
-            f"[USER]\n{prompt_3}"
+
+        # ── Step 3: Side-by-Side Deception Check ─────────────────────────
+        prompt_3 = load_prompt(
+            "evaluator_deception_check.md",
+            deception_technique=deception_technique,
+            global_reality=global_reality,
+            local_narrative=local_narrative,
         )
-        
-        chat_log.append({'role': 'user', 'content': prompt_3})
-        
-        print("      > Turn 3: Final Verdict (Code Fixes)...")
-        response_3 = call_gemini_with_images(turn_3_input, image_paths)
-        chat_log.append({'role': 'assistant', 'content': response_3})
-        
+        append_log("STEP 3 PROMPT", prompt_3)
+
+        print("      > Step 3: Side-by-Side Deception Check...")
+        step3_content = _gemini_call(prompt_3, images=[honest_path, deceptive_path])
+        append_log("STEP 3 RESPONSE", step3_content)
+
         save_log()
-        
-        return f"CODE_ERROR: {response_3.strip()}"
-        
+
+        step3_upper = step3_content.upper()
+        if "[DECEPTION EFFECTIVE]" in step3_upper:
+            return {
+                "verdict": "PASS",
+                "reality_interpretation": reality_interpretation,
+                "narrative_interpretation": narrative_interpretation,
+                "failure_reason": "",
+            }
+        elif "[DECEPTION FAILED" in step3_upper:
+            reason_match = re.search(r"\[DECEPTION FAILED[:\s]*(.+?)\]", step3_content, re.IGNORECASE | re.DOTALL)
+            reason = reason_match.group(1).strip() if reason_match else step3_content.strip()
+            return {
+                "verdict": "FAIL",
+                "reality_interpretation": reality_interpretation,
+                "narrative_interpretation": narrative_interpretation,
+                "failure_reason": f"Deception Check FAILED: {reason}",
+            }
+        else:
+            print(f"      > Step 3 formatting failed, retrying evaluation ({attempt + 1}/{MAX_EVALUATOR_RETRIES})...")
+            continue
+
     print(f"❌ Evaluator failed to output a valid tag format after {MAX_EVALUATOR_RETRIES} retries. Giving up.")
     sys.exit(1)
 
@@ -193,17 +238,25 @@ def main():
     target_category_saved = target_category
     workspace = ""
 
-    # Outer Loop (Strategy)
+    # ═══════════════════════════════════════════════════════════════════
+    # OUTER LOOP: Atomic Generation Cycles (Idea → Code → Evaluate)
+    # Each iteration produces a NEW idea from the Idea Generator.
+    # ═══════════════════════════════════════════════════════════════════
     for strategy_revision in range(MAX_STRATEGY_REVISIONS):
         if overall_pass:
             break
-            
-        # Inner Loop (Strategy Formatting)
+
+        # ── Loop 1: Generate Idea (with format retries) ──────────────
         for strategy_attempt in range(MAX_STRATEGY_RETRIES):
-            print(f"\n🧠 STEP 1: Consulting Gemini CLI ({GEMINI_MODEL}) for idea generation (Revision {strategy_revision + 1}/{MAX_STRATEGY_REVISIONS}, Attempt {strategy_attempt + 1}/{MAX_STRATEGY_RETRIES})...")
+            print(f"\n🧠 STEP 1: Consulting Gemini for idea generation (Revision {strategy_revision + 1}/{MAX_STRATEGY_REVISIONS}, Attempt {strategy_attempt + 1}/{MAX_STRATEGY_RETRIES})...")
             
-            # call_gemini_text pipes idea_history to stdin — identical to original
-            content = call_gemini_text(idea_history)
+            result = subprocess.run(
+                ["gemini", "-m", GEMINI_MODEL],
+                input=idea_history.encode('utf-8'),
+                capture_output=True,
+                check=True
+            )
+            content = result.stdout.decode('utf-8').strip()
             
             required_keys = ["category_slug:", "context_slug:", "true_claim:", "biased_claim:"]
             missing_keys = [k for k in required_keys if k not in content]
@@ -236,6 +289,7 @@ def main():
             workspace = os.path.join(original_cwd, f"output/{file_prefix}_{timestamp}")
             os.makedirs(workspace, exist_ok=True)
             os.chdir(workspace)
+            os.environ["GEMINI_WORKSPACE"] = workspace
             print(f"🚀 Workspace created: {workspace}")
 
         if extra_instructions:
@@ -246,141 +300,141 @@ def main():
 
         print("📝 Strategy generated and saved to strategy.txt.")
 
-        # Initialize state for the Code Agent
+        # ── Loop 2: Generate Code until Execution Success (Fast-Fail) ─
         code_history = ""
+        run_success = False
+        generated_code = ""
+        execution_output = ""
 
-        # Inner Loop (Evaluator Revisions)
-        for code_revision in range(MAX_CODE_REVISIONS):
-            run_success = False
-            images_exist = False
-            
-            for code_attempt in range(MAX_CODE_RETRIES):
-                print(f"\n🧠 STEP 2: Consulting Gemini CLI ({GEMINI_MODEL}) for Code Execution (Revision {code_revision + 1}/{MAX_CODE_REVISIONS}, Attempt {code_attempt + 1}/{MAX_CODE_RETRIES})...")
-            
-                merged_text = f"{system_text}\n{content}"
-                merged_text = merged_text.replace("{{FILE_PREFIX}}", file_prefix)
-    
-                if extra_instructions:
-                    merged_text += f"\n\n**MANUAL INSTRUCTIONS:**\n{extra_instructions}"
-    
-                if code_history:
-                    gemini_code_input = f"{merged_text}\n\n{code_history}"
-                else:
-                    gemini_code_input = merged_text
-    
-                with open("script.py", "w", encoding='utf-8') as out_f:
-                    subprocess.run(
-                        ["gemini", "-m", GEMINI_MODEL],
-                        input=gemini_code_input.encode('utf-8'),
-                        stdout=out_f,
-                        check=True
-                    )
-                
-                with open("script.py", "r", encoding='utf-8') as in_f:
-                    generated_code = in_f.read()
-    
-                print("📊 Rendering charts...")
-                execution_output = ""
-                run_success = False
-                for auto_install_attempt in range(3):
-                    run_result = subprocess.run(["uv", "run", "script.py"], capture_output=True, text=True)
-                    execution_output = f"STDOUT:\n{run_result.stdout}\nSTDERR:\n{run_result.stderr}"
-                    
-                    if run_result.returncode == 0:
-                        run_success = True
-                        break
-                    
-                    match = re.search(r"ModuleNotFoundError: No module named '([^']+)'", run_result.stderr)
-                    if match:
-                        missing_module = match.group(1)
-                        print(f"📦 Auto-installing missing module '{missing_module}'...")
-                        subprocess.run(["uv", "pip", "install", missing_module], check=True)
-                        print("🔄 Retrying script execution...")
-                    else:
-                        print(f"⚠️ Script execution failed:\n{run_result.stderr}")
-                        break
-    
-                honest_png = f"{file_prefix}_honest.png"
-                deceptive_png = f"{file_prefix}_deceptive.png"
-                
-                images_exist = os.path.exists(honest_png) and os.path.exists(deceptive_png)
-                
-                if not run_success or not images_exist:
-                    print("❌ Code execution failed or images not generated.")
-                    error_out = execution_output if not run_success else "Images not found after execution."
-                    error_msg = load_prompt("error_code_execution.md", generated_code=generated_code, error_msg=error_out)
-                    code_history += f"\n\n{error_msg}"
-                    continue
-                else:
-                    break
-                    
-            else:
-                print(f"\n❌ Code generator failed to produce running code {MAX_CODE_RETRIES} times consecutively. Giving up completely.")
-                sys.exit(1)
-                
-            if True:
-                honest_txt = f"{file_prefix}_honest.txt"
-                deceptive_txt = f"{file_prefix}_deceptive.txt"
-                
-                try:
-                    with open(honest_txt, 'r', encoding='utf-8') as f:
-                        honest_claim = f.read().strip()
-                    with open(deceptive_txt, 'r', encoding='utf-8') as f:
-                        deceptive_claim = f.read().strip()
-                except Exception as e:
-                    print(f"⚠️ Failed to read claim text files: {e}")
-                    honest_claim = "Honest claim missing"
-                    deceptive_claim = "Deceptive claim missing"
-    
-                claims = [honest_claim, deceptive_claim]
-                random.shuffle(claims)
-                claim_a, claim_b = claims[0], claims[1]
-                
-                image_paths = [honest_png, deceptive_png]
-                random.shuffle(image_paths)
-    
-                print("👁️  Calling Evaluator Agent (" + GEMINI_MODEL + ") via 3-Turn Chat (Gemini CLI)...")
-                # We pass both image paths (shuffled) and claims (shuffled) for blinded analysis
-                evaluator_output = evaluate_chart_with_history(topic_text, content, generated_code, image_paths, claim_a, claim_b, "evaluator_log.txt")
-                print(f"⚖️  Evaluator Output:\n{evaluator_output}")
-    
-                # Archiving helper function
-                def archive_files(strategy_idx, revision_idx, move_strategy=False):
-                    import shutil
-                    archive_dir = os.path.join(workspace, "archive", f"s{strategy_idx}_r{revision_idx}")
-                    os.makedirs(archive_dir, exist_ok=True)
-                    for f in os.listdir("."):
-                        if os.path.isfile(f):
-                            if f == "strategy.txt" and not move_strategy:
-                                continue
-                            shutil.move(f, os.path.join(archive_dir, f))
+        for code_attempt in range(MAX_CODE_RETRIES):
+            print(f"\n🧠 STEP 2: Consulting Gemini for Code Execution (Attempt {code_attempt + 1}/{MAX_CODE_RETRIES})...")
         
-                # Routing Logic based on Evaluator Output
-                evaluator_output_upper = evaluator_output.strip().upper()
-                if evaluator_output_upper.startswith("PASS") or "PASS\n" in evaluator_output_upper or evaluator_output_upper == "PASS":
-                    overall_pass = True
-                    break # Break code loop
-                elif "STRATEGY_ERROR" in evaluator_output:
-                    reason = evaluator_output.split("STRATEGY_ERROR", 1)[-1].lstrip(":- \n")
-                    error_msg = load_prompt("error_strategy_eval.md", strategy=content, reason=reason)
-                    idea_history += f"\n\n{error_msg}"
-                    archive_files(strategy_revision, code_revision, move_strategy=True)
-                    break # Break code loop and retry strategy loop
-                elif "CODE_ERROR" in evaluator_output:
-                    reason = evaluator_output.split("CODE_ERROR", 1)[-1].lstrip(":- \n")
-                    error_msg = load_prompt("error_code_eval.md", generated_code=generated_code, execution_output=execution_output, reason=reason)
-                    code_history += f"\n\n{error_msg}"
-                    archive_files(strategy_revision, code_revision, move_strategy=False)
-                    # Continues to next code_revision
+            merged_text = f"{system_text}\n{content}"
+            merged_text = merged_text.replace("{{FILE_PREFIX}}", file_prefix)
+
+            if extra_instructions:
+                merged_text += f"\n\n**MANUAL INSTRUCTIONS:**\n{extra_instructions}"
+
+            if code_history:
+                gemini_code_input = f"{merged_text}\n\n{code_history}"
+            else:
+                gemini_code_input = merged_text
+
+            with open("script.py", "w", encoding='utf-8') as out_f:
+                subprocess.run(
+                    ["gemini", "-m", GEMINI_MODEL],
+                    input=gemini_code_input.encode('utf-8'),
+                    stdout=out_f,
+                    check=True
+                )
+            
+            with open("script.py", "r", encoding='utf-8') as in_f:
+                generated_code = in_f.read()
+
+            print("📊 Rendering charts...")
+            execution_output = ""
+            run_success = False
+            for auto_install_attempt in range(3):
+                run_result = subprocess.run(["uv", "run", "script.py"], capture_output=True, text=True)
+                execution_output = f"STDOUT:\n{run_result.stdout}\nSTDERR:\n{run_result.stderr}"
+                
+                if run_result.returncode == 0:
+                    run_success = True
+                    break
+                
+                match = re.search(r"ModuleNotFoundError: No module named '([^']+)'", run_result.stderr)
+                if match:
+                    missing_module = match.group(1)
+                    print(f"📦 Auto-installing missing module '{missing_module}'...")
+                    subprocess.run(["uv", "pip", "install", missing_module], check=True)
+                    print("🔄 Retrying script execution...")
                 else:
-                    print("⚠️ Evaluator returned an unrecognized prefix. Treating as CODE_ERROR.")
-                    error_msg = load_prompt("error_code_eval.md", generated_code=generated_code, execution_output=execution_output, reason=evaluator_output) # Reusing error_code_eval as fallback
-                    code_history += f"\n\n{error_msg}"
-                    archive_files(strategy_revision, code_revision, move_strategy=False)
-    
+                    print(f"⚠️ Script execution failed:\n{run_result.stderr}")
+                    break
+
+            honest_png = f"{file_prefix}_honest.png"
+            deceptive_png = f"{file_prefix}_deceptive.png"
+            
+            images_exist = os.path.exists(honest_png) and os.path.exists(deceptive_png)
+            
+            if not run_success or not images_exist:
+                # Fast-fail: script crashed → retry Code Generator with traceback
+                print("❌ Code execution failed or images not generated.")
+                error_out = execution_output if not run_success else "Images not found after execution."
+                error_msg = load_prompt("error_code_execution.md", generated_code=generated_code, error_msg=error_out)
+                code_history += f"\n\n{error_msg}"
+                continue
+            else:
+                break
+                
+        if not run_success or not images_exist:
+            print(f"\n❌ Code generator failed to produce running code {MAX_CODE_RETRIES} times. Skipping to next idea revision.")
+            # Treat persistent crashes as a signal that the idea itself may be unimplementable.
+            # Send global feedback to the Idea Generator and continue the outer loop.
+            error_msg = load_prompt(
+                "error_global_feedback.md",
+                strategy=content,
+                previous_code=generated_code,
+                blind_reality_extraction="(code never executed successfully — no chart produced)",
+                blind_narrative_extraction="(code never executed successfully — no chart produced)",
+                reason=f"Code failed to execute after {MAX_CODE_RETRIES} attempts. Last error: {execution_output}",
+            )
+            idea_history += f"\n\n{error_msg}"
+            continue
+
+        # ── Evaluate: Sequential Validation Gauntlet ─────────────────
+        honest_txt = f"{file_prefix}_honest.txt"
+        deceptive_txt = f"{file_prefix}_deceptive.txt"
+        
+        try:
+            with open(honest_txt, 'r', encoding='utf-8') as f:
+                honest_claim = f.read().strip()
+            with open(deceptive_txt, 'r', encoding='utf-8') as f:
+                deceptive_claim = f.read().strip()
+        except Exception as e:
+            print(f"⚠️ Failed to read claim text files: {e}")
+            honest_claim = "Honest claim missing"
+            deceptive_claim = "Deceptive claim missing"
+
+        claims = [honest_claim, deceptive_claim]
+        random.shuffle(claims)
+        claim_a, claim_b = claims[0], claims[1]
+        
+        image_paths = [honest_png, deceptive_png]
+        random.shuffle(image_paths)
+
+        print("👁️  Calling Evaluator Agent (" + GEMINI_MODEL + ") via Sequential Gauntlet...")
+        gauntlet_result = evaluate_gauntlet(content, image_paths, "evaluator_log.txt")
+        print(f"⚖️  Evaluator Verdict: {gauntlet_result['verdict']}")
+        if gauntlet_result['failure_reason']:
+            print(f"    Reason: {gauntlet_result['failure_reason']}")
+
+        # Archiving helper function
+        def archive_files(strategy_idx):
+            import shutil
+            archive_dir = os.path.join(workspace, "archive", f"s{strategy_idx}")
+            os.makedirs(archive_dir, exist_ok=True)
+            for f in os.listdir("."):
+                if os.path.isfile(f):
+                    shutil.move(f, os.path.join(archive_dir, f))
+
+        if gauntlet_result["verdict"] == "PASS":
+            overall_pass = True
+            break  # Exit outer loop — we're done
         else:
-            print(f"\n❌ Evaluator rejected the code {MAX_CODE_REVISIONS} times consecutively. Giving up completely.")
-            sys.exit(1)
+            # ── Global Feedback: Package entire state for Idea Generator ──
+            error_msg = load_prompt(
+                "error_global_feedback.md",
+                strategy=content,
+                previous_code=generated_code,
+                blind_reality_extraction=gauntlet_result["reality_interpretation"],
+                blind_narrative_extraction=gauntlet_result["narrative_interpretation"],
+                reason=gauntlet_result["failure_reason"],
+            )
+            idea_history += f"\n\n{error_msg}"
+            archive_files(strategy_revision)
+            print(f"🔄 Gauntlet failed — sending global feedback to Idea Generator for a new atomic cycle.")
+            # Continue outer loop with new idea
 
     else:
         print(f"\n❌ Strategy generator failed {MAX_STRATEGY_REVISIONS} times consecutively. Giving up completely.")

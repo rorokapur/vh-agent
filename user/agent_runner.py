@@ -19,8 +19,8 @@ import ollama
 ollama_client = ollama.Client(host='http://127.0.0.1:11434')
 
 BASE_URL = "https://staging.visual-honesty.rohankapur.dev"
-MODEL_NAME = "gemma4:e2b"
-MAX_STREAM_TIME = 60.0
+MODEL_NAME = "gemma4:e4b"
+MAX_STREAM_TIME = 120.0
 
 class Colors:
     CYAN = '\033[96m'
@@ -44,8 +44,8 @@ class SolverAgent:
     def initialize_session(self):
         print("Initializing session...")
         payload = {
-            "p_category": "ai",
-            "p_demographics": {"type": MODEL_NAME}
+            "category": "ai",
+            "demographics": {"type": MODEL_NAME}
         }
         try:
             response = self.requests_session.post(f"{BASE_URL}/api/user/", json=payload)
@@ -92,6 +92,131 @@ class SolverAgent:
             return None
 
     def analyze_image(self, trial_data):
+        trial_type = trial_data.get("trial_type", "pair")
+        if trial_type == "single":
+            return self._analyze_single(trial_data)
+        else:
+            return self._analyze_pair(trial_data)
+
+    def _analyze_single(self, trial_data):
+        """Processes single task: downloads image and queries Llama 3.2 Vision."""
+        stimulus = trial_data.get("stimulus", {})
+        s_id = stimulus.get("id")
+        
+        if not s_id:
+            print("Error: Trial data missing 'stimulus' ID.")
+            return None, None, 0
+
+        s_url = f"{BASE_URL}{stimulus.get('image_url')}"
+        print(f"Layout: Single={s_id[:8]}")
+
+        start_time = time.time()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            s_file = os.path.join(tmpdir, "stimulus.png")
+            
+            try:
+                # Download
+                with open(s_file, "wb") as f:
+                    f.write(self.requests_session.get(s_url).content)
+
+                # Prompt Llama via Ollama
+                prompt = (
+                    'I am showing you a chart. It is either is a standard, honest visualization, '
+                    'or one uses a deceptive tactic (like a truncated axis or skewed scaling) to '
+                    'misrepresent the data. Which one of these options best describes it?  '
+                    'You MUST respond EXACTLY and ONLY with either "deceptive" or "honest". '
+                    'Do not include any other text, explanation, or punctuation.'
+                )
+                
+                trial_start = time.time()
+                attempt = 0
+                verdict = None
+                
+                while True:
+                    attempt += 1
+                    print(f"Querying {MODEL_NAME} (Ollama) [Attempt {attempt}]...")
+                    
+                    req_start = time.time()
+                    stream = ollama_client.chat(
+                        model=MODEL_NAME,
+                        messages=[{
+                            'role': 'user',
+                            'content': prompt,
+                            'images': [s_file]
+                        }],
+                        think=True,
+                        stream=True
+                    )
+                    
+                    model_output = ""
+                    in_thinking = False
+                    first_token_received = False
+                    stream_aborted = False
+                    
+                    for chunk in stream:
+                        if not first_token_received:
+                            ttft = time.time() - req_start
+                            print(f"[TTFT: {ttft:.2f}s] ", end="")
+                            first_token_received = True
+
+                        if (time.time() - trial_start) > MAX_STREAM_TIME:
+                            print(f"\n[ERROR] Total execution time exceeded {MAX_STREAM_TIME}s limit! Aborting stream.")
+                            stream_aborted = True
+                            break
+
+                        if getattr(chunk.message, 'thinking', None):
+                            if not in_thinking:
+                                print(f'\n{Colors.DIM}--- Thinking ---\n', end='')
+                                in_thinking = True
+                            print(chunk.message.thinking, end='', flush=True)
+
+                        elif getattr(chunk.message, 'content', None):
+                            if in_thinking:
+                                print(f'{Colors.ENDC}\n\n{Colors.CYAN}--- Final Answer ---\n', end='')
+                                in_thinking = False
+                            elif not model_output:
+                                print(f'\n{Colors.CYAN}--- Final Answer ---\n', end='')
+                                
+                            print(chunk.message.content, end='', flush=True)
+                            model_output += chunk.message.content
+                            
+                    print(f'{Colors.ENDC}\n')
+                        
+                    if stream_aborted:
+                        verdict = None
+                        break
+                    
+                    model_output = model_output.strip()
+                    answer = model_output.lower()
+                    
+                    # Basic parsing logic, assuming prompt asks for "deceptive" or "honest"
+                    deceptive_idx = answer.rfind("deceptive")
+                    honest_idx = answer.rfind("honest")
+                    
+                    if deceptive_idx == -1 and honest_idx == -1:
+                        if (time.time() - trial_start) > MAX_STREAM_TIME:
+                            print(f"\n[ERROR] Ambiguous output and trial time exceeded {MAX_STREAM_TIME}s limit! Submitting null.")
+                            verdict = None
+                            break
+                        print(f"Warning: Ambiguous model output (or empty response). Retrying...")
+                        print(f"[DEBUG] Model Output computed was: '{model_output}'")
+                        print(f"[DEBUG] Total Trial Elapsed Time: {time.time() - trial_start:.2f}s / {MAX_STREAM_TIME}s")
+                        continue
+                    elif deceptive_idx > honest_idx:
+                        verdict = True
+                        break
+                    else:
+                        verdict = False
+                        break
+                
+            except Exception as e:
+                print(f"Analysis failed: {e}")
+                verdict = None
+
+            analysis_time_ms = int((time.time() - start_time) * 1000)
+            return None, verdict, analysis_time_ms
+
+    def _analyze_pair(self, trial_data):
         """Processes comparative task: downloads images from left/right paths and queries Llama 3.2 Vision."""
         left = trial_data.get("left", {})
         right = trial_data.get("right", {})
@@ -101,7 +226,7 @@ class SolverAgent:
         
         if not left_id or not right_id:
             print("Error: Trial data missing 'left' or 'right' IDs.")
-            return None, 0
+            return None, None, 0
 
         l_url = f"{BASE_URL}{left.get('image_url')}"
         r_url = f"{BASE_URL}{right.get('image_url')}"
@@ -224,15 +349,19 @@ class SolverAgent:
                 choice_id = None
 
             analysis_time_ms = int((time.time() - start_time) * 1000)
-            return choice_id, analysis_time_ms
+            return choice_id, None, analysis_time_ms
 
-    def submit_trial(self, trial_id, choice, analysis_time):
-        print(f"Submitting trial {trial_id}: choice={choice} (Time elapsed: {analysis_time/1000.0:.2f}s)")
+    def submit_trial(self, trial_id, choice, verdict, analysis_time):
+        print(f"Submitting trial {trial_id}: choice={choice}, verdict={verdict} (Time elapsed: {analysis_time/1000.0:.2f}s)")
         payload = {
             "trialId": trial_id,
-            "choice": choice,
             "frontendTime": analysis_time
         }
+        if choice is not None:
+            payload["choice"] = choice
+        if verdict is not None:
+            payload["verdict"] = verdict
+            
         try:
             response = self.requests_session.post(f"{BASE_URL}/api/user/trial/submit", json=payload)
             if response.status_code == 200 or response.status_code == 201:
@@ -302,9 +431,9 @@ def main():
             print(f"Error: Could not extract trial ID from response: {trial_data}")
             break
 
-        choice_id, analysis_time = agent.analyze_image(trial_data)
+        choice_id, verdict, analysis_time = agent.analyze_image(trial_data)
         
-        if agent.submit_trial(trial_id, choice_id, analysis_time):
+        if agent.submit_trial(trial_id, choice_id, verdict, analysis_time):
             trials_conducted += 1
             print(f"Progress: {trials_conducted} trials completed.")
             

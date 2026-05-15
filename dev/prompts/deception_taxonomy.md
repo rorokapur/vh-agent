@@ -14,6 +14,6 @@ For your design task, the deception pipeline is strictly categorized into the fo
   - *Examples (Non-exhaustive)*: Dual/secondary Y-axes with misaligned scales to force false intersections, Y-axis truncation (non-zero baselines), irregular/logarithmic scaling disguised as linear, or inverted axes. Feel free to explore other deceptive framing tricks.
 
 - **Styling**: This category involves the aesthetic and perceptual properties applied over the chart (colors, textures, strokes, 3D effects, shading). Deceptive techniques here exploit human visual psychology to draw false attention or obfuscate critical data points.
-  - *Examples (Non-exhaustive)*: Misleading color gradients (e.g., using a diverging color palette for sequential data), low luminance-contrast to hide poor performance data points, or 3D chart tilts/perspective warping that visually distorts the area of distant segments. You may deploy any perceptual/stylistic exploit.
+  - *Examples (Non-exhaustive)*: Misleading color gradients (e.g., using a diverging color palette for sequential data), low luminance-contrast to hide poor performance data points, or severe aspect ratio distortion (e.g., using fig.set_size_inches() to stretch a chart extremely wide or tall to flatten or exaggerate slopes). You may deploy any perceptual/stylistic exploit. Do NOT use 3D charts (mplot3d) as they cause frequent rendering failures.
 
 
